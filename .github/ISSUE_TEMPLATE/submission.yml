@@ -1,0 +1,47 @@
+name: New project submission
+description: Suggest a green-tech FDI project that's missing from the dataset
+title: "[New project] "
+labels: ["submission"]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for flagging a project! Fill in whatever you can — the **source link** is the most important field."
+  - type: dropdown
+    id: technology
+    attributes:
+      label: Technology
+      options:
+        - Solar
+        - Wind
+        - Battery
+        - EV
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source link
+      description: Press release, news article, company filing, etc.
+      placeholder: https://...
+    validations:
+      required: true
+  - type: input
+    id: company
+    attributes:
+      label: Company / parent
+      placeholder: e.g. CATL
+  - type: input
+    id: country
+    attributes:
+      label: Destination country
+      placeholder: e.g. Hungary
+  - type: input
+    id: capital
+    attributes:
+      label: Capital investment (US$ millions, if known)
+      placeholder: e.g. 7500
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      placeholder: City, year announced, joint-venture partner, etc.
