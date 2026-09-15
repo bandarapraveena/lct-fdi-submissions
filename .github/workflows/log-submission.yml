@@ -31,6 +31,7 @@ jobs:
           gh label create logged       --color 0E8A16 --description "Copied into pending_submissions.csv" --force
           gh label create correction   --color FBCA04 --description "Update to an existing project, not a new one" --force
           gh label create needs-source --color D93F0B --description "No usable source URL yet" --force
+          gh label create duplicate    --color CCCCCC --description "Duplicate of an existing/other project" --force
       - name: Sync this issue into the pending log
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

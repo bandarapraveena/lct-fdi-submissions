@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """Move See-Something-Say-Something GitHub issues into pending_submissions.csv.
 
+The CSV mirrors the main dataset's columns (FDI_All_ToSource.xlsx 'All' sheet:
+Sector … Operational) so an accepted row lifts into the dataset 1:1, plus three
+trailing housekeeping columns (submission_status, date_logged, submission_notes)
+that are dropped on merge. The file is written UTF-8 with a BOM so Excel on macOS
+renders accented city names correctly.
+
 Two modes, both idempotent (an issue is logged at most once):
 
     python3 scripts/sync_submissions.py --issue 42     # one issue (issue-opened trigger)
     python3 scripts/sync_submissions.py --all-open      # every open issue (scheduled reconcile)
 
 For each `submission`-labelled issue:
-  * `[New project] ...`  -> append a `pending` row, add the `logged` label + a comment.
-  * `[Update ...]` / `[Location ...]` -> it's a correction to an existing record, not a new
-    project: add the `correction` label + a comment, and DO NOT touch the CSV.
-  * placeholder / missing source URL -> add the `needs-source` label + a comment, skip the CSV.
+  * `[New project] ...`  -> append a lean `pending` row (main-dataset columns filled
+    only where the issue form gives them; Project Status / Year Completed / JV / HQ
+    left blank for a human sourcing pass), then label `logged` + comment.
+  * `[Update ...]` / `[Location ...]` -> a correction to an existing record: label
+    `correction` + comment, do NOT touch the CSV.
+  * placeholder / missing source URL -> label `needs-source` + comment, skip the CSV.
 
-The row is written lean and honest: only fields the issue form actually captured. HQ, city,
-year and the true capex are left for a human to confirm at accept time — automation does not guess.
-
-Fetching uses the `gh` CLI (present on GitHub-hosted runners; GITHUB_TOKEN in the env). For local
-testing without gh, set SUBMISSIONS_ISSUES_JSON to a file holding the /issues API array; label and
-comment calls become no-ops and the CSV is still written.
+Fetching uses the `gh` CLI (present on GitHub-hosted runners; GITHUB_TOKEN in env).
+For local testing without gh, set SUBMISSIONS_ISSUES_JSON to a file holding the
+/issues API array; label/comment calls become no-ops and the CSV is still written.
 """
 
 import argparse
@@ -27,18 +32,28 @@ import json
 import os
 import re
 import subprocess
-import sys
 
 REPO = os.environ.get("SUBMISSIONS_REPO", "bandarapraveena/lct-fdi-submissions")
 CSV_PATH = os.environ.get("SUBMISSIONS_CSV") or os.path.join(
     os.path.dirname(__file__), os.pardir, "pending_submissions.csv")
 CSV_PATH = os.path.abspath(CSV_PATH)
-COLUMNS = ["date_logged", "status", "technology", "company", "parent_hq",
-           "destination_country", "destination_city", "year_announced",
-           "capital_usd_m", "source", "notes"]
+
+MAIN = ["Sector", "Project ID", "Parent company", "Company Country (HQ)", "Project Status",
+        "Destination Country", "Destination city", "Year Announced", "Year Completed",
+        "Technology", "Industry activity", "Capital Investment (US$m)", "Expansion",
+        "Joint Venture", "Joint Venture Local", "Joint Venture Company",
+        "Source (Parent company name and HQ)", "Source (Project Status)",
+        "Source (Project location, country and city)", "Source (Amount)",
+        "Source (Ownership share, where available)", "Source (Date Announced [MM/DD/YYYY])",
+        "Source (Date Completed [MM/DD/YYYY])", "Source (Industry Activity)",
+        "Source (Joint Venture)", "Operational"]
+HOUSE = ["submission_status", "date_logged", "submission_notes"]
+COLUMNS = MAIN + HOUSE
 
 PLACEHOLDER_HOSTS = ("example.com", "example.org", "example.net", "localhost")
 LOCAL_JSON = os.environ.get("SUBMISSIONS_ISSUES_JSON")  # set for offline testing
+RESOLVED_PATH = os.environ.get("SUBMISSIONS_RESOLVED") or os.path.join(
+    os.path.dirname(CSV_PATH), "resolved_issues.csv")
 
 
 # ---- gh helpers (no-ops offline) -------------------------------------------------
@@ -51,7 +66,6 @@ def gh_json(path):
 
 
 def gh_write(args):
-    """Run a `gh` write command; skipped when testing offline."""
     if LOCAL_JSON:
         print("  [offline] would run: gh " + " ".join(args))
         return
@@ -87,7 +101,6 @@ def host_of(url):
 
 
 def capital_number(raw):
-    """Return a bare number only if the field is purely numeric; else '' (phrase kept in notes)."""
     raw = (raw or "").strip()
     return raw.replace(",", "") if re.match(r"^[\d,]+(\.\d+)?$", raw) else ""
 
@@ -102,25 +115,36 @@ def classify(issue):
     host = host_of(src)
     if not src or host in PLACEHOLDER_HOSTS or host.endswith(".example.com"):
         return "needs-source", src, None
-    row = {
-        "date_logged": datetime.date.today().isoformat(),
-        "status": "pending",
-        "technology": field(body, "Technology"),
-        "company": field(body, "Company / parent"),
-        "parent_hq": "",
-        "destination_country": field(body, "Destination country"),
-        "destination_city": "",
-        "year_announced": "",
-        "capital_usd_m": capital_number(field(body, "Capital investment (US$ millions, if known)")),
-        "source": src,
-    }
+
+    tech = field(body, "Technology")
     caps = field(body, "Capital investment (US$ millions, if known)")
-    note = f"Auto-logged from See-Something-Say-Something GitHub issue #{issue['number']}. HQ/city/year to confirm at triage."
+    cap = capital_number(caps)
+    note = (f"Auto-logged from See-Something-Say-Something GitHub issue #{issue['number']}. "
+            f"HQ / Project Status / Year / JV / Year Completed to confirm at triage.")
     if field(body, "Anything else?"):
         note += " Submitter notes: " + re.sub(r"\s+", " ", field(body, "Anything else?")).strip()
-    if caps and not row["capital_usd_m"]:
+    if caps and not cap:
         note += f" Capital stated as '{caps}'."
-    row["notes"] = note
+
+    row = {c: "" for c in COLUMNS}
+    row.update({
+        "Sector": tech,
+        "Technology": tech,
+        "Destination Country": field(body, "Destination country"),
+        "Industry activity": "Manufacturing",
+        "Capital Investment (US$m)": cap,
+        "Expansion": 0,
+        "Source (Parent company name and HQ)": src,
+        "Source (Project Status)": src,
+        "Source (Project location, country and city)": src,
+        "Source (Amount)": src if cap else "",
+        "Source (Date Announced [MM/DD/YYYY])": src,
+        "submission_status": "pending",
+        "date_logged": datetime.date.today().isoformat(),
+        "submission_notes": note,
+    })
+    # the issue form's "Company / parent" -> Parent company
+    row["Parent company"] = field(body, "Company / parent")
     return "new", src, row
 
 
@@ -128,15 +152,31 @@ def classify(issue):
 def already_logged_numbers():
     nums = set()
     if os.path.exists(CSV_PATH):
-        for r in csv.DictReader(open(CSV_PATH)):
-            for m in re.finditer(r"issue #(\d+)", r.get("notes", "") or ""):
+        for r in csv.DictReader(open(CSV_PATH, encoding="utf-8-sig")):
+            for m in re.finditer(r"issue #(\d+)", r.get("submission_notes", "") or ""):
                 nums.add(int(m.group(1)))
     return nums
 
 
+def resolved_numbers():
+    """Issues a human has manually dispositioned (e.g. dropped as duplicate) and that
+    must never be auto-logged again, even though no CSV row references them."""
+    out = {}
+    if os.path.exists(RESOLVED_PATH):
+        for r in csv.DictReader(open(RESOLVED_PATH, encoding="utf-8-sig")):
+            try:
+                out[int(r["issue"])] = (r.get("disposition", "").strip() or "resolved",
+                                        r.get("reason", ""))
+            except (ValueError, KeyError):
+                continue
+    return out
+
+
 def append_rows(rows):
     exists = os.path.exists(CSV_PATH)
-    with open(CSV_PATH, "a", newline="") as f:
+    # BOM only when creating the file; append as plain utf-8 so no BOM lands mid-file.
+    enc = "utf-8" if exists else "utf-8-sig"
+    with open(CSV_PATH, "a", newline="", encoding=enc) as f:
         w = csv.DictWriter(f, fieldnames=COLUMNS)
         if not exists:
             w.writeheader()
@@ -147,11 +187,23 @@ def append_rows(rows):
 # ---- main ------------------------------------------------------------------------
 def process(issues):
     done = already_logged_numbers()
-    new_rows, logged, corrections, needs_source, skipped = [], [], [], [], []
+    resolved = resolved_numbers()
+    new_rows, logged, corrections, needs_source, resolved_hits, skipped = [], [], [], [], [], []
     for issue in issues:
         num = issue["number"]
         labels = {l["name"] for l in issue.get("labels", [])}
-        if num in done or "logged" in labels or "correction" in labels or "needs-source" in labels:
+        # Manual dispositions win first, so a dropped duplicate is always labelled/commented
+        # for visibility and never re-logged — even if a stray "#N" mention elsewhere would
+        # otherwise mark it "already handled".
+        if num in resolved:
+            disposition, reason = resolved[num]
+            resolved_hits.append(num)
+            if disposition not in labels:
+                add_label(num, disposition)
+                comment(num, f"Recorded as **{disposition}** in `resolved_issues.csv` and not logged"
+                             f" to the pending list. {reason}")
+            continue
+        if num in done or {"logged", "correction", "needs-source", "duplicate"} & labels:
             skipped.append(num)
             continue
         kind, src, row = classify(issue)
@@ -167,7 +219,7 @@ def process(issues):
     for num in logged:
         add_label(num, "logged")
         comment(num, "Logged to `pending_submissions.csv` as a pending submission — thank you! "
-                     "A maintainer will review it for the main dataset.")
+                     "A maintainer will source the remaining fields and review it for the main dataset.")
     for num in corrections:
         add_label(num, "correction")
         comment(num, "Thanks! This looks like a correction to an **existing** project rather than a "
@@ -179,6 +231,7 @@ def process(issues):
     print(f"logged (new): {logged}")
     print(f"corrections:  {corrections}")
     print(f"needs-source: {needs_source}")
+    print(f"resolved (ledger, skipped): {resolved_hits}")
     print(f"skipped (already handled): {skipped}")
     return len(new_rows)
 
